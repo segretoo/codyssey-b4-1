@@ -215,6 +215,7 @@ main() {
   [ "$warned" -eq 1 ] && echo
 
   rotate_log
+  # '>>' (append): 매분 실행될 때마다 기존 로그 뒤에 이어 쓴다. '>' 였다면 실행마다 파일이 비워져 마지막 1줄만 남는다.
   printf '[%s] PID:%s CPU:%s%% MEM:%s%% DISK_USED:%s%%\n' \
     "$(timestamp)" "$pid" "$cpu" "$mem" "$disk" >> "$LOG_FILE"
 

@@ -337,12 +337,26 @@ codyssey-b4-1/
 
 | 결정 | 선택 | 이유 |
 |---|---|---|
-| 프로세스 탐지 | `pgrep -f`(명령줄 전체) 대신 **실행 파일/스크립트 이름만** 비교 | 명령줄 전체를 보면 `vim agent_app.py`, 경로에 `agent-app`이 든 `monitor.sh` 자신까지 "앱이 살아있다"고 오판 |
-| 로그 로테이션 | `logrotate` 대신 **스크립트 내 구현** | `logrotate`는 보통 root 권한 작업인데, cron 실행 계정은 일반 계정(`agent-admin`) |
+| 프로세스 탐지 | `pgrep -f`(명령줄 전체) 대신 **실행 파일/스크립트 이름만** 비교 | 명령줄 전체를 보면 `vim agent_app.py`, 경로에 `agent-app`이 든 `monitor.sh` 자신까지 "앱이 살아있다"고 오판합니다. 실제로 앱을 꺼도 `OK`가 나오는 오탐을 겪었고, `pgrep -x`는 프로세스 이름이 15자로 잘려 `agent-app-linux-x86`(19자)와 맞지 않아 쓰지 못했습니다 |
+| 로그 로테이션 | `logrotate` 대신 **스크립트 내 구현** (`rotate_log()`) | ① `logrotate` 설정(`/etc/logrotate.d/`)은 root 권한이 필요한데 cron 실행 계정은 일반 계정(`agent-admin`)입니다 ② 기본 `logrotate`는 하루 한 번 실행되어, 매분 쌓이는 로그가 10MB를 넘는 시점에 바로 자르지 못합니다 ③ 스크립트 하나에 점검·기록·로테이션이 들어 있어 제출물만으로 동작이 완결됩니다 |
 | 방화벽 점검 | `ufw status`(root 필요) 대신 `ufw.conf` + 서비스 상태 | 일반 계정에서 매분 실행 가능. 한계: 허용 포트 목록까지는 점검하지 못함 |
 | 헬스체크 실패 | `exit 1` + 로그에 `HEALTH_FAIL` 한 줄 | 비정상 종료도 흔적이 남아야 사후 추적 가능 (통계는 샘플 형식 줄만 집계) |
 | 동시 실행 | `flock`으로 겹침 방지 | 이전 실행이 길어져도 로그가 뒤섞이거나 로테이션이 꼬이지 않음 |
 | cron 출력 | `>/dev/null 2>&1` | 출력은 이미 `monitor.log`에 남기므로 cron 메일/별도 파일 누적 방지 |
+| 로그 기록 방식 | 덮어쓰기 `>` 대신 **이어쓰기 `>>`** | `>`는 열 때마다 파일을 비웁니다. cron이 매분 새 프로세스로 실행하므로 `>`를 쓰면 로그에 **마지막 한 줄만** 남아 추이를 볼 수 없습니다. `>>`는 기존 내용 뒤에 붙이므로 누적됩니다 (키 파일처럼 항상 새로 만드는 파일에는 `>`를 씁니다) |
+
+**참고: 운영 환경에서 `logrotate`를 쓴다면** (root 권한 + 하루 1회 → 시간 단위 실행이 필요해 `logrotate.timer` 주기 조정 또는 별도 cron이 필요)
+
+```conf
+# /etc/logrotate.d/agent-app
+/var/log/agent-app/monitor.log {
+    size 10M            # 10MB 이상이면 회전
+    rotate 9            # 현재 파일 + 이전 9개 = 최대 10개
+    missingok
+    notifempty
+    create 660 agent-admin agent-core
+}
+```
 
 ## 배운 것 & 마무리
 
@@ -359,4 +373,7 @@ codyssey-b4-1/
 - **여러 줄 붙여넣기 주의**: `sudo -iu`, `ssh`처럼 셸이 바뀌는 명령 뒤에 붙인 줄은 새 셸이 열리기 전에 입력돼 사라집니다. 첫 `sudo`가 비밀번호를 물을 때도 뒤 줄이 비밀번호로 들어갈 수 있어 `sudo -v`를 먼저 실행하고 붙여넣습니다
 - **Ubuntu 24.04**: `ssh.socket`이 포트를 잡고 있어 `sshd_config`의 `Port`가 무시될 수 있습니다. 이 경우 `sudo systemctl disable --now ssh.socket && sudo systemctl enable --now ssh`로 서비스 방식으로 전환합니다
 - **앱 파일**: 제공 앱은 아키텍처별로 파일이 다릅니다(x86 / arm64). `uname -m`으로 확인해서 맞는 파일을 실행합니다
+- **프로세스는 있는데 포트가 안 열릴 때** (`HEALTH_FAIL: process=OK port=DOWN`): ① `ss -ltnp | grep 15034` 또는 `sudo lsof -i :15034`로 누가 어느 주소(`127.0.0.1`만인지, 전체인지)에 열었는지 확인 ② 앱 로그(`/var/log/agent-app/agent_app.log`)와 stderr에서 **바인딩 오류**를 찾습니다 — `Address already in use`(다른 프로세스가 같은 포트 점유), `Permission denied`(1024 미만 포트는 root 필요), 설정된 `AGENT_PORT` 불일치 ③ `ps -o pid,stat,etime,cmd -p <PID>`로 아직 기동 중인지, 재시작을 반복하는지 확인 ④ 서버 안(`nc -zv 127.0.0.1 15034`)에서는 열리는데 밖에서만 안 되면 UFW/VirtualBox 포트 포워딩 문제입니다
+- **로그가 급증해 디스크가 찰 때**: ① `df -h`, `du -xh /var/log --max-depth=2 | sort -h`로 큰 파일 확인 ② 열려 있는 로그는 `rm`해도 공간이 돌아오지 않으므로 `truncate -s 0` 또는 프로세스 재시작 ③ `COMPRESS_DAYS=1 log_retention.sh`로 보존 기간을 줄여 압축·이동 ④ 급증 원인(오류 반복, 디버그 레벨)을 먼저 차단 ⑤ `DISK_LIMIT`(기본 80%) 경고가 뜨는지 `monitor.sh` 출력으로 확인. 장기적으로는 `/var/log` 별도 볼륨, 중앙 로그 수집을 고려합니다
+- **웹 서버(Nginx 등)로 감시 대상이 바뀔 때**: `AGENT_PROC_REGEX='^nginx'`, `AGENT_PORT=80`으로 대상만 바꿀 수 있고, 로그 경로와 `CPU_LIMIT`/`MEM_LIMIT`은 환경 변수로 조정합니다. 웹 서버는 포트가 열려도 정상 응답이 아닐 수 있어 `curl`로 HTTP 응답 확인을, 동시 접속·리스닝 큐(`ss -s`, `worker_connections`) 점검은 별도로 추가해야 합니다
 - **cron이 안 돌 때**: ① `systemctl status cron` ② 스크립트 실행 권한/그룹(`agent-admin`이 `agent-core` 소속인지) ③ 로그 디렉터리 쓰기 권한 ④ `/var/log/syslog`의 `CRON` 줄 순서로 확인합니다
